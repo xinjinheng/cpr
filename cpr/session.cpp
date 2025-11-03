@@ -273,8 +273,24 @@ Response Session::makeRequest() {
 }
 
 void Session::SetLimitRate(const LimitRate& limit_rate) {
-    curl_easy_setopt(curl_->handle, CURLOPT_MAX_RECV_SPEED_LARGE, limit_rate.downrate);
-    curl_easy_setopt(curl_->handle, CURLOPT_MAX_SEND_SPEED_LARGE, limit_rate.uprate);
+    curl_easy_setopt(curl_->handle, CURLOPT_MAX_RECV_SPEED_LARGE, static_cast<curl_off_t>(limit_rate.downrate));
+    curl_easy_setopt(curl_->handle, CURLOPT_MAX_SEND_SPEED_LARGE, static_cast<curl_off_t>(limit_rate.uprate));
+}
+
+void Session::SetRetryPolicy(std::shared_ptr<RetryPolicy> policy) {
+    retry_policy_ = std::move(policy);
+}
+
+void Session::SetCircuitBreaker(std::shared_ptr<CircuitBreaker> breaker) {
+    circuit_breaker_ = std::move(breaker);
+}
+
+void Session::AddInterceptor(std::shared_ptr<Interceptor> interceptor) {
+    interceptors_.push_back(std::move(interceptor));
+}
+
+void Session::ClearInterceptors() {
+    interceptors_.clear();
 }
 
 const Content& Session::GetContent() const {
@@ -655,30 +671,30 @@ void Session::SetHttpVersion(const HttpVersion& version) {
             curl_easy_setopt(curl_->handle, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
             break;
 
-#if LIBCURL_VERSION_NUM >= 0x072100 // 7.33.0
+#if LIBCURL_VERSION_NUM >= 0x072100 // 7.33.0 && defined(CPR_ENABLE_HTTP2)
         case HttpVersionCode::VERSION_2_0:
             curl_easy_setopt(curl_->handle, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2_0);
             break;
 #endif
 
-#if LIBCURL_VERSION_NUM >= 0x072F00 // 7.47.0
+#if LIBCURL_VERSION_NUM >= 0x072F00 // 7.47.0 && defined(CPR_ENABLE_HTTP2)
         case HttpVersionCode::VERSION_2_0_TLS:
             curl_easy_setopt(curl_->handle, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
             break;
 #endif
 
-#if LIBCURL_VERSION_NUM >= 0x073100 // 7.49.0
+#if LIBCURL_VERSION_NUM >= 0x073100 // 7.49.0 && defined(CPR_ENABLE_HTTP2)
         case HttpVersionCode::VERSION_2_0_PRIOR_KNOWLEDGE:
             curl_easy_setopt(curl_->handle, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE);
             break;
 #endif
 
-#if LIBCURL_VERSION_NUM >= 0x074200 // 7.66.0
+#if LIBCURL_VERSION_NUM >= 0x074200 // 7.66.0 && defined(CPR_ENABLE_HTTP3)
         case HttpVersionCode::VERSION_3_0:
             curl_easy_setopt(curl_->handle, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_3);
             break;
 #endif
-#if LIBCURL_VERSION_NUM >= 0x075701 // 7.87.1, but corresponds to 7.88.0 tag
+#if LIBCURL_VERSION_NUM >= 0x075701 // 7.87.1, but corresponds to 7.88.0 tag && defined(CPR_ENABLE_HTTP3)
         case HttpVersionCode::VERSION_3_0_ONLY:
             curl_easy_setopt(curl_->handle, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_3ONLY);
             break;
@@ -750,8 +766,81 @@ Response Session::Download(std::ofstream& file) {
 }
 
 Response Session::Get() {
-    PrepareGet();
-    return makeRequest();
+    int retry_count = 0;
+    Response response;
+    Error error;
+    
+    do {
+        // Check if circuit breaker allows the request
+        if (circuit_breaker_ && !circuit_breaker_->IsAllowed()) {
+            error = Error{ErrorCode::CIRCUIT_BREAKER_OPEN, "Circuit breaker is open"};
+            break;
+        }
+        
+        try {
+            PrepareGet();
+            
+            // Execute beforeRequest interceptors
+            for (auto& interceptor : interceptors_) {
+                interceptor->beforeRequest(*this);
+            }
+            
+            response = makeRequest();
+            error = response.error;
+            
+            // Execute afterResponse interceptors
+            for (auto& interceptor : interceptors_) {
+                interceptor->afterResponse(*this, response);
+            }
+            
+            // Record success or failure
+            if (circuit_breaker_) {
+                if (error.code == ErrorCode::OK && response.status_code >= 200 && response.status_code < 500) {
+                    circuit_breaker_->RecordSuccess();
+                } else {
+                    circuit_breaker_->RecordFailure();
+                }
+            }
+            
+            // Check if we should retry
+            if (!retry_policy_ || !retry_policy_->ShouldRetry(response, error)) {
+                break;
+            }
+            
+            // Wait before retrying
+            auto delay = retry_policy_->GetRetryDelay(retry_count);
+            if (delay == std::chrono::milliseconds::max()) {
+                break;
+            }
+            
+            std::this_thread::sleep_for(delay);
+            retry_count++;
+            
+        } catch (const std::exception& e) {
+            error = Error{ErrorCode::INTERNAL_ERROR, e.what()};
+            if (circuit_breaker_) {
+                circuit_breaker_->RecordFailure();
+            }
+            if (!retry_policy_ || !retry_policy_->ShouldRetry(response, error)) {
+                break;
+            }
+            
+            // Wait before retrying
+            auto delay = retry_policy_->GetRetryDelay(retry_count);
+            if (delay == std::chrono::milliseconds::max()) {
+                break;
+            }
+            
+            std::this_thread::sleep_for(delay);
+            retry_count++;
+        }
+    } while (true);
+    
+    if (error.code != ErrorCode::OK) {
+        response.error = error;
+    }
+    
+    return response;
 }
 
 Response Session::Head() {
@@ -792,36 +881,73 @@ AsyncResponse Session::GetAsync() {
     return async([shared_this]() { return shared_this->Get(); });
 }
 
+AsyncResponse Session::GetAsync(ThreadPool& pool) {
+    auto shared_this = shared_from_this();
+    return async(pool, [shared_this]() { return shared_this->Get(); });
+}
+
 AsyncResponse Session::DeleteAsync() {
     return async([shared_this = GetSharedPtrFromThis()]() { return shared_this->Delete(); });
+}
+
+AsyncResponse Session::DeleteAsync(ThreadPool& pool) {
+    return async(pool, [shared_this = GetSharedPtrFromThis()]() { return shared_this->Delete(); });
 }
 
 AsyncResponse Session::DownloadAsync(const WriteCallback& write) {
     return async([shared_this = GetSharedPtrFromThis(), write]() { return shared_this->Download(write); });
 }
 
+AsyncResponse Session::DownloadAsync(const WriteCallback& write, ThreadPool& pool) {
+    return async(pool, [shared_this = GetSharedPtrFromThis(), write]() { return shared_this->Download(write); });
+}
+
 AsyncResponse Session::DownloadAsync(std::ofstream& file) {
     return async([shared_this = GetSharedPtrFromThis(), &file]() { return shared_this->Download(file); });
+}
+
+AsyncResponse Session::DownloadAsync(std::ofstream& file, ThreadPool& pool) {
+    return async(pool, [shared_this = GetSharedPtrFromThis(), &file]() { return shared_this->Download(file); });
 }
 
 AsyncResponse Session::HeadAsync() {
     return async([shared_this = GetSharedPtrFromThis()]() { return shared_this->Head(); });
 }
 
+AsyncResponse Session::HeadAsync(ThreadPool& pool) {
+    return async(pool, [shared_this = GetSharedPtrFromThis()]() { return shared_this->Head(); });
+}
+
 AsyncResponse Session::OptionsAsync() {
     return async([shared_this = GetSharedPtrFromThis()]() { return shared_this->Options(); });
+}
+
+AsyncResponse Session::OptionsAsync(ThreadPool& pool) {
+    return async(pool, [shared_this = GetSharedPtrFromThis()]() { return shared_this->Options(); });
 }
 
 AsyncResponse Session::PatchAsync() {
     return async([shared_this = GetSharedPtrFromThis()]() { return shared_this->Patch(); });
 }
 
+AsyncResponse Session::PatchAsync(ThreadPool& pool) {
+    return async(pool, [shared_this = GetSharedPtrFromThis()]() { return shared_this->Patch(); });
+}
+
 AsyncResponse Session::PostAsync() {
     return async([shared_this = GetSharedPtrFromThis()]() { return shared_this->Post(); });
 }
 
+AsyncResponse Session::PostAsync(ThreadPool& pool) {
+    return async(pool, [shared_this = GetSharedPtrFromThis()]() { return shared_this->Post(); });
+}
+
 AsyncResponse Session::PutAsync() {
     return async([shared_this = GetSharedPtrFromThis()]() { return shared_this->Put(); });
+}
+
+AsyncResponse Session::PutAsync(ThreadPool& pool) {
+    return async(pool, [shared_this = GetSharedPtrFromThis()]() { return shared_this->Put(); });
 }
 
 std::shared_ptr<CurlHolder> Session::GetCurlHolder() {

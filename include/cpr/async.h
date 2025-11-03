@@ -33,6 +33,21 @@ auto async(Fn&& fn, Args&&... args) {
   }
 }
 
+/**
+ * Return a wrapper for a future, calling future.get() will wait until the task is done and return RetType.
+ * Uses a custom thread pool instead of the global one.
+ **/
+template <bool isCancellable = false, class Fn, class... Args>
+auto async(ThreadPool& pool, Fn&& fn, Args&&... args) {
+  std::future future = pool.Submit(std::forward<Fn>(fn), std::forward<Args>(args)...);
+  using async_wrapper_t = AsyncWrapper<decltype(future.get()), isCancellable>;
+  if constexpr (isCancellable) {
+    return async_wrapper_t{std::move(future), std::make_shared<std::atomic_bool>(false)};
+  } else {
+    return async_wrapper_t{std::move(future)};
+  }
+}
+
 class async {
   public:
     static void startup(size_t min_threads = CPR_DEFAULT_THREAD_POOL_MIN_THREAD_NUM, size_t max_threads = CPR_DEFAULT_THREAD_POOL_MAX_THREAD_NUM, std::chrono::milliseconds max_idle_ms = CPR_DEFAULT_THREAD_POOL_MAX_IDLE_TIME) {

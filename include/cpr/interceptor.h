@@ -29,6 +29,8 @@ class Interceptor {
     Interceptor& operator=(const Interceptor& other) = default;
     Interceptor& operator=(Interceptor&& old) = default;
 
+    virtual void beforeRequest(Session& session) {};
+    virtual void afterResponse(Session& session, Response& response) {};
     virtual Response intercept(Session& session) = 0;
 
   protected:

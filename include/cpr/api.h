@@ -21,7 +21,7 @@
 
 namespace cpr {
 
-using AsyncResponse = AsyncWrapper<Response>;
+using AsyncResponse = AsyncWrapper<Response, true>;
 
 namespace priv {
 

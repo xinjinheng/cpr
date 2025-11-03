@@ -44,6 +44,8 @@
 #include "cpr/user_agent.h"
 #include "cpr/util.h"
 #include "cpr/verbose.h"
+#include "cpr/retry_policy.h"
+#include "cpr/circuit_breaker.h"
 
 namespace cpr {
 
@@ -116,6 +118,11 @@ class Session : public std::enable_shared_from_this<Session> {
     void SetAcceptEncoding(const AcceptEncoding& accept_encoding);
     void SetAcceptEncoding(AcceptEncoding&& accept_encoding);
     void SetLimitRate(const LimitRate& limit_rate);
+    void SetRetryPolicy(std::shared_ptr<RetryPolicy> policy);
+    void SetCircuitBreaker(std::shared_ptr<CircuitBreaker> breaker);
+    
+    void AddInterceptor(std::shared_ptr<Interceptor> interceptor);
+    void ClearInterceptors();
 
     /**
      * Returns a reference to the content sent in previous request.
@@ -130,6 +137,13 @@ class Session : public std::enable_shared_from_this<Session> {
 
     // For cancellable requests
     void SetCancellationParam(std::shared_ptr<std::atomic_bool> param);
+    
+    // For retry and circuit breaker
+    std::shared_ptr<RetryPolicy> retry_policy_;
+    std::shared_ptr<CircuitBreaker> circuit_breaker_;
+    
+    // For interceptors
+    std::vector<std::shared_ptr<Interceptor>> interceptors_;
 
     // Used in templated functions
     void SetOption(const Url& url);
@@ -205,14 +219,23 @@ class Session : public std::enable_shared_from_this<Session> {
     Response Put();
 
     AsyncResponse GetAsync();
+    AsyncResponse GetAsync(ThreadPool& pool);
     AsyncResponse DeleteAsync();
+    AsyncResponse DeleteAsync(ThreadPool& pool);
     AsyncResponse DownloadAsync(const WriteCallback& write);
+    AsyncResponse DownloadAsync(const WriteCallback& write, ThreadPool& pool);
     AsyncResponse DownloadAsync(std::ofstream& file);
+    AsyncResponse DownloadAsync(std::ofstream& file, ThreadPool& pool);
     AsyncResponse HeadAsync();
+    AsyncResponse HeadAsync(ThreadPool& pool);
     AsyncResponse OptionsAsync();
+    AsyncResponse OptionsAsync(ThreadPool& pool);
     AsyncResponse PatchAsync();
+    AsyncResponse PatchAsync(ThreadPool& pool);
     AsyncResponse PostAsync();
+    AsyncResponse PostAsync(ThreadPool& pool);
     AsyncResponse PutAsync();
+    AsyncResponse PutAsync(ThreadPool& pool);
 
     template <typename Then>
     auto GetCallback(Then then);
