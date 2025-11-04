@@ -17,14 +17,14 @@ enum class HttpVersionCode {
      * Enforce HTTP 1.1 requests.
      **/
     VERSION_1_1,
-#if LIBCURL_VERSION_NUM >= 0x072100 // 7.33.0
+#if LIBCURL_VERSION_NUM >= 0x072100 // 7.33.0 && defined(CPR_ENABLE_HTTP2)
     /**
      * Attempt HTTP 2.0 requests.
      * Fallback to HTTP 1.1 if negotiation fails.
      **/
     VERSION_2_0,
 #endif
-#if LIBCURL_VERSION_NUM >= 0x072F00 // 7.47.0
+#if LIBCURL_VERSION_NUM >= 0x072F00 // 7.47.0 && defined(CPR_ENABLE_HTTP2)
     /**
      * Attempt HTTP 2.0 for HTTPS requests only.
      * Fallback to HTTP 1.1 if negotiation fails.
@@ -32,7 +32,7 @@ enum class HttpVersionCode {
      **/
     VERSION_2_0_TLS,
 #endif
-#if LIBCURL_VERSION_NUM >= 0x073100 // 7.49.0
+#if LIBCURL_VERSION_NUM >= 0x073100 // 7.49.0 && defined(CPR_ENABLE_HTTP2)
     /**
      * Start HTTP 2.0 for HTTP requests.
      * Requires prior knowledge that the server supports HTTP 2.0.
@@ -40,7 +40,7 @@ enum class HttpVersionCode {
      **/
     VERSION_2_0_PRIOR_KNOWLEDGE,
 #endif
-#if LIBCURL_VERSION_NUM >= 0x074200 // 7.66.0
+#if LIBCURL_VERSION_NUM >= 0x074200 // 7.66.0 && defined(CPR_ENABLE_HTTP3)
     /**
      * Attempt HTTP 3.0 requests.
      * Requires prior knowledge that the server supports HTTP 3.0 since there is no gracefully downgrade.
@@ -48,7 +48,7 @@ enum class HttpVersionCode {
      **/
     VERSION_3_0,
 #endif
-#if LIBCURL_VERSION_NUM >= 0x075701 // 7.87.1, but corresponds to 7.88.0 tag
+#if LIBCURL_VERSION_NUM >= 0x075701 // 7.87.1, but corresponds to 7.88.0 tag && defined(CPR_ENABLE_HTTP3)
     /**
      * Enforce HTTP 3.0 requests without fallback.
      * Requires prior knowledge that the server supports HTTP 3.0 since there is no gracefully downgrade.
